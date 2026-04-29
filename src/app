@@ -1,0 +1,876 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  MessageSquare, 
+  Mic, 
+  MicOff, 
+  Volume2, 
+  VolumeX, 
+  Camera, 
+  Video, 
+  VideoOff, 
+  Send, 
+  RotateCcw,
+  Sparkles,
+  Heart,
+  Info,
+  X,
+  Calendar,
+  ChevronRight,
+  ChevronLeft,
+  Utensils,
+  RefreshCw,
+  Clock,
+  ShoppingCart,
+  CheckCircle2,
+  Circle
+} from 'lucide-react';
+import Markdown from 'react-markdown';
+import { chatWithCoach, analyzeImage, generateMealPlan, generateShoppingList } from './services/gemini';
+import { cn } from './lib/utils';
+
+interface Message {
+  role: 'user' | 'model';
+  content: string;
+  isVoice?: boolean;
+}
+
+interface Meal {
+  title: string;
+  description: string;
+  tips: string;
+  ingredients: string[];
+  instructions: string[];
+}
+
+interface DayPlan {
+  day: string;
+  meals: {
+    breakfast: Meal;
+    lunch: Meal;
+    snack: Meal;
+    dinner: Meal;
+  };
+}
+
+interface WeeklyPlan {
+  week: DayPlan[];
+}
+
+interface ShoppingItem {
+  name: string;
+  amount: string;
+  checked?: boolean;
+}
+
+interface ShoppingCategory {
+  name: string;
+  items: ShoppingItem[];
+}
+
+interface ShoppingList {
+  categories: ShoppingCategory[];
+}
+
+type ViewMode = 'chat' | 'planner' | 'shopping';
+
+export default function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>('chat');
+  const [messages, setMessages] = useState<Message[]>([
+    { role: 'model', content: '¡Hola! Soy tu HormoneHealth Coach. Estoy aquí para apoyarte con tu nutrición y salud hormonal. ¿En qué puedo ayudarte hoy? [i]' }
+  ]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isVoiceMode, setIsVoiceMode] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  
+  // Meal Planner State
+  const [mealPlan, setMealPlan] = useState<WeeklyPlan | null>(null);
+  const [selectedDayIdx, setSelectedDayIdx] = useState(0);
+  const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
+
+  // Shopping List State
+  const [shoppingList, setShoppingList] = useState<ShoppingList | null>(null);
+  const [isGeneratingList, setIsGeneratingList] = useState(false);
+
+  // Recipe Modal State
+  const [selectedRecipe, setSelectedRecipe] = useState<Meal | null>(null);
+
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const recognitionRef = useRef<any>(null);
+
+  // Scroll to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Speech Recognition Setup
+  useEffect(() => {
+    if (typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+      recognitionRef.current.lang = 'es-ES';
+
+      recognitionRef.current.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        handleSendMessage(transcript, true);
+      };
+
+      recognitionRef.current.onend = () => {
+        setIsVoiceMode(false);
+      };
+    }
+  }, []);
+
+  const toggleVoiceMode = () => {
+    if (isVoiceMode) {
+      recognitionRef.current?.stop();
+      setIsVoiceMode(false);
+    } else {
+      recognitionRef.current?.start();
+      setIsVoiceMode(true);
+    }
+  };
+
+  const speak = (text: string) => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text.replace(/\[i\]/g, ''));
+      utterance.lang = 'es-ES';
+      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onend = () => setIsSpeaking(false);
+      window.speechSynthesis.speak(utterance);
+    }
+  };
+
+  const stopSpeaking = () => {
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+  };
+
+  const handleSendMessage = async (text: string, fromVoice = false) => {
+    if (!text.trim()) return;
+
+    const userMessage: Message = { role: 'user', content: text, isVoice: fromVoice };
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+
+    try {
+      const history = messages.map(m => ({
+        role: m.role,
+        parts: [{ text: m.content }]
+      }));
+      
+      const response = await chatWithCoach(text, history);
+      const modelMessage: Message = { role: 'model', content: response || 'Lo siento, hubo un error.' };
+      setMessages(prev => [...prev, modelMessage]);
+      
+      if (fromVoice) {
+        speak(modelMessage.content);
+      }
+    } catch (error) {
+      console.error(error);
+      setMessages(prev => [...prev, { role: 'model', content: 'Lo siento, ha ocurrido un error al procesar tu solicitud.' }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const openCamera = async () => {
+    setIsCameraOpen(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error("Error accessing camera:", err);
+      setIsCameraOpen(false);
+    }
+  };
+
+  const closeCamera = () => {
+    const stream = videoRef.current?.srcObject as MediaStream;
+    stream?.getTracks().forEach(track => track.stop());
+    setIsCameraOpen(false);
+    setCapturedImage(null);
+  };
+
+  const captureImage = () => {
+    if (videoRef.current && canvasRef.current) {
+      const context = canvasRef.current.getContext('2d');
+      if (context) {
+        canvasRef.current.width = videoRef.current.videoWidth;
+        canvasRef.current.height = videoRef.current.videoHeight;
+        context.drawImage(videoRef.current, 0, 0);
+        const imageData = canvasRef.current.toDataURL('image/jpeg');
+        setCapturedImage(imageData);
+      }
+    }
+  };
+
+  const analyzeCapturedImage = async () => {
+    if (!capturedImage) return;
+    
+    setIsLoading(true);
+    const base64 = capturedImage.split(',')[1];
+    
+    try {
+      const response = await analyzeImage(base64);
+      setMessages(prev => [...prev, 
+        { role: 'user', content: 'Analizando etiqueta de alimento...' },
+        { role: 'model', content: response || 'No pude analizar la imagen.' }
+      ]);
+      closeCamera();
+      setViewMode('chat');
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleGenerateMealPlan = async () => {
+    setIsGeneratingPlan(true);
+    try {
+      const plan = await generateMealPlan();
+      setMealPlan(plan);
+      setSelectedDayIdx(0);
+      setShoppingList(null); // Reset shopping list when meal plan changes
+    } catch (error) {
+      console.error("Error generating meal plan:", error);
+    } finally {
+      setIsGeneratingPlan(false);
+    }
+  };
+
+  const handleGenerateShoppingList = async () => {
+    if (!mealPlan) return;
+    setIsGeneratingList(true);
+    try {
+      const list = await generateShoppingList(mealPlan);
+      setShoppingList(list);
+      setViewMode('shopping');
+    } catch (error) {
+      console.error("Error generating shopping list:", error);
+    } finally {
+      setIsGeneratingList(false);
+    }
+  };
+
+  const toggleShoppingItem = (catIdx: number, itemIdx: number) => {
+    if (!shoppingList) return;
+    const newList = { ...shoppingList };
+    newList.categories[catIdx].items[itemIdx].checked = !newList.categories[catIdx].items[itemIdx].checked;
+    setShoppingList(newList);
+  };
+
+  const currentDayPlan = mealPlan?.week[selectedDayIdx];
+
+  return (
+    <div className="flex flex-col h-screen bg-brand-secondary">
+      {/* Header */}
+      <header className="bg-white border-b border-gray-200 px-6 py-4 flex flex-col gap-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-brand-primary rounded-full flex items-center justify-center text-white">
+              <Heart size={24} />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-brand-primary leading-tight">HormoneHealth Coach</h1>
+              <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Nutrición & Salud Hormonal</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => {
+                setMessages([{ role: 'model', content: '¡Hola! Soy tu HormoneHealth Coach. Estoy aquí para apoyarte con tu nutrición y salud hormonal. ¿En qué puedo ayudarte hoy? [i]' }]);
+                setMealPlan(null);
+                setShoppingList(null);
+              }}
+              className="p-2 text-gray-400 hover:text-brand-primary hover:bg-brand-primary/5 rounded-full transition-all duration-300 active:scale-90"
+              title="Reiniciar todo"
+            >
+              <RotateCcw size={20} />
+            </button>
+          </div>
+        </div>
+
+        {/* Navigation Tabs */}
+        <div className="flex bg-gray-100 p-1 rounded-xl">
+          <button 
+            onClick={() => setViewMode('chat')}
+            className={cn(
+              "flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all",
+              viewMode === 'chat' ? "bg-[#fce6e6] text-[#585806] shadow-sm" : "text-gray-500 hover:text-gray-700"
+            )}
+          >
+            <MessageSquare size={18} />
+            Chat
+          </button>
+          <button 
+            onClick={() => setViewMode('planner')}
+            className={cn(
+              "flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all",
+              viewMode === 'planner' ? "bg-[#f6cfcf] text-[#6a7a18] shadow-sm" : "text-gray-500 hover:text-gray-700"
+            )}
+          >
+            <Calendar size={18} />
+            Plan
+          </button>
+          <button 
+            onClick={() => setViewMode('shopping')}
+            className={cn(
+              "flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all",
+              viewMode === 'shopping' ? "bg-[#f7acac] text-[#68712a] shadow-sm" : "text-gray-500 hover:text-gray-700"
+            )}
+          >
+            <ShoppingCart size={18} />
+            Lista
+          </button>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-1 overflow-y-auto bg-[#e6d9d9]">
+        {viewMode === 'chat' ? (
+          <div className="p-4 md:p-6 space-y-6">
+            <AnimatePresence initial={false}>
+              {messages.map((msg, idx) => (
+                <motion.div
+                  key={idx}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className={cn(
+                    "flex w-full",
+                    msg.role === 'user' ? "justify-end" : "justify-start"
+                  )}
+                >
+                  <div className={cn(
+                    "max-w-[85%] md:max-w-[70%] rounded-2xl p-4 shadow-sm",
+                    msg.role === 'user' 
+                      ? "bg-brand-primary text-white rounded-tr-none" 
+                      : "bg-white text-gray-800 rounded-tl-none border border-gray-100"
+                  )}
+                  >
+                    <div className="markdown-body text-[#5f5a26]">
+                      <Markdown>{msg.content}</Markdown>
+                    </div>
+                    {msg.role === 'model' && (
+                      <div className="mt-2 flex justify-end">
+                        <button 
+                          onClick={() => speak(msg.content)}
+                          className="p-1 hover:bg-gray-100 rounded transition-colors text-gray-400"
+                        >
+                          <Volume2 size={16} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="bg-white border border-gray-100 rounded-2xl rounded-tl-none p-4 shadow-sm flex items-center gap-2">
+                  <div className="w-2 h-2 bg-brand-accent rounded-full animate-bounce" />
+                  <div className="w-2 h-2 bg-brand-accent rounded-full animate-bounce [animation-delay:0.2s]" />
+                  <div className="w-2 h-2 bg-brand-accent rounded-full animate-bounce [animation-delay:0.4s]" />
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+        ) : viewMode === 'planner' ? (
+          <div className="p-4 md:p-6 max-w-4xl mx-auto">
+            {!mealPlan ? (
+              <div className="flex flex-col items-center justify-center py-20 text-center space-y-6">
+                <div className="w-20 h-20 bg-brand-primary/10 rounded-full flex items-center justify-center text-brand-primary">
+                  <Utensils size={40} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-serif font-bold text-gray-800">Tu Plan Semanal</h2>
+                  <p className="text-gray-500 max-w-xs mx-auto mt-2">
+                    Genera un plan de alimentación personalizado con recetas detalladas e instrucciones paso a paso.
+                  </p>
+                </div>
+                <button 
+                  onClick={handleGenerateMealPlan}
+                  disabled={isGeneratingPlan}
+                  className="bg-brand-primary text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-brand-primary/90 transition-all flex items-center gap-2 disabled:opacity-70"
+                >
+                  {isGeneratingPlan ? (
+                    <div className="flex items-center gap-2">
+                      <RefreshCw size={18} className="animate-spin opacity-70" />
+                      <span>Generando</span>
+                      <span className="flex gap-0.5">
+                        <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1] }} className="w-1 h-1 bg-white rounded-full" />
+                        <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1], delay: 0.2 }} className="w-1 h-1 bg-white rounded-full" />
+                        <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1], delay: 0.4 }} className="w-1 h-1 bg-white rounded-full" />
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      <Sparkles size={20} />
+                      Crear Plan Semanal
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* Day Selector */}
+                <div className="flex items-center justify-between bg-white p-2 rounded-2xl shadow-sm border border-gray-100">
+                  <button 
+                    onClick={() => setSelectedDayIdx(prev => (prev > 0 ? prev - 1 : 6))}
+                    className="p-2 text-gray-400 hover:text-brand-primary transition-colors"
+                  >
+                    <ChevronLeft size={24} />
+                  </button>
+                  <div className="text-center">
+                    <span className="text-xs font-bold text-brand-accent uppercase tracking-widest">Día {selectedDayIdx + 1}</span>
+                    <h3 className="text-xl font-serif font-bold text-brand-primary">{currentDayPlan?.day}</h3>
+                  </div>
+                  <button 
+                    onClick={() => setSelectedDayIdx(prev => (prev < 6 ? prev + 1 : 0))}
+                    className="p-2 text-gray-400 hover:text-brand-primary transition-colors"
+                  >
+                    <ChevronRight size={24} />
+                  </button>
+                </div>
+
+                {/* Meals Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {currentDayPlan && Object.entries(currentDayPlan.meals).map(([type, meal]) => (
+                    <motion.div 
+                      key={type}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 flex flex-col gap-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-brand-accent uppercase tracking-widest bg-brand-accent/10 px-2 py-1 rounded-full">
+                          {type === 'breakfast' ? 'Desayuno' : type === 'lunch' ? 'Almuerzo' : type === 'snack' ? 'Merienda' : 'Cena'}
+                        </span>
+                        <Clock size={14} className="text-gray-300" />
+                      </div>
+                      <h4 className="text-lg font-serif font-bold text-gray-800 leading-tight">{meal.title}</h4>
+                      <p className="text-sm text-gray-600 leading-relaxed">{meal.description}</p>
+                      
+                      <button 
+                        onClick={() => setSelectedRecipe(meal)}
+                        className="mt-3 w-full py-2 px-4 bg-brand-primary/10 text-brand-primary rounded-xl text-xs font-bold hover:bg-brand-primary/20 transition-all flex items-center justify-center gap-2 border border-brand-primary/10"
+                      >
+                        <Utensils size={14} />
+                        Ver receta completa
+                      </button>
+
+                      <div className="mt-auto pt-3 border-t border-gray-50 flex items-start gap-2">
+                        <Info size={14} className="text-brand-primary shrink-0 mt-0.5" />
+                        <p className="text-[11px] italic text-brand-primary/80 leading-snug">{meal.tips}</p>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+
+                <div className="flex flex-col items-center gap-4 pt-4">
+                  <button 
+                    onClick={handleGenerateShoppingList}
+                    disabled={isGeneratingList}
+                    className="bg-brand-accent text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-brand-accent/90 transition-all flex items-center gap-2 disabled:opacity-70"
+                  >
+                    {isGeneratingList ? (
+                      <div className="flex items-center gap-2">
+                        <RefreshCw size={18} className="animate-spin opacity-70" />
+                        <span>Consolidando</span>
+                        <span className="flex gap-0.5">
+                          <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1] }} className="w-1 h-1 bg-white rounded-full" />
+                          <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1], delay: 0.2 }} className="w-1 h-1 bg-white rounded-full" />
+                          <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1], delay: 0.4 }} className="w-1 h-1 bg-white rounded-full" />
+                        </span>
+                      </div>
+                    ) : (
+                      <>
+                        <ShoppingCart size={20} />
+                        Generar Lista de la Compra
+                      </>
+                    )}
+                  </button>
+                  <button 
+                    onClick={handleGenerateMealPlan}
+                    disabled={isGeneratingPlan}
+                    className="text-xs font-bold text-gray-400 hover:text-brand-primary transition-colors flex items-center gap-2"
+                  >
+                    <RefreshCw size={14} className={cn(isGeneratingPlan && "animate-spin")} />
+                    Regenerar plan semanal
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="p-4 md:p-6 max-w-2xl mx-auto">
+            {!shoppingList ? (
+              <div className="flex flex-col items-center justify-center py-20 text-center space-y-6">
+                <div className="w-20 h-20 bg-brand-accent/10 rounded-full flex items-center justify-center text-brand-accent">
+                  <ShoppingCart size={40} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-serif font-bold text-gray-800">Lista de la Compra</h2>
+                  <p className="text-gray-500 max-w-xs mx-auto mt-2">
+                    {mealPlan 
+                      ? "Consolida todos los ingredientes necesarios para tu plan semanal en una lista organizada."
+                      : "Primero debes generar un plan de comidas en la pestaña 'Plan'."}
+                  </p>
+                </div>
+                {mealPlan && (
+                  <button 
+                    onClick={handleGenerateShoppingList}
+                    disabled={isGeneratingList}
+                    className="bg-brand-accent text-white px-8 py-3 rounded-full font-bold shadow-lg hover:bg-brand-accent/90 transition-all flex items-center gap-2 disabled:opacity-70"
+                  >
+                    {isGeneratingList ? (
+                      <div className="flex items-center gap-2">
+                        <RefreshCw size={18} className="animate-spin opacity-70" />
+                        <span>Generando</span>
+                        <span className="flex gap-0.5">
+                          <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1] }} className="w-1 h-1 bg-white rounded-full" />
+                          <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1], delay: 0.2 }} className="w-1 h-1 bg-white rounded-full" />
+                          <motion.span animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5, times: [0, 0.5, 1], delay: 0.4 }} className="w-1 h-1 bg-white rounded-full" />
+                        </span>
+                      </div>
+                    ) : (
+                      <>
+                        <Sparkles size={20} />
+                        Generar Lista
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-8">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-serif font-bold text-brand-primary">Lista Consolidada</h2>
+                  <button 
+                    onClick={handleGenerateShoppingList}
+                    className="text-xs font-bold text-brand-accent hover:underline flex items-center gap-1"
+                  >
+                    <RefreshCw size={12} /> Actualizar
+                  </button>
+                </div>
+
+                {shoppingList.categories.map((category, catIdx) => (
+                  <div key={catIdx} className="space-y-3">
+                    <h3 className="text-xs font-bold text-brand-accent uppercase tracking-widest border-b border-brand-accent/20 pb-1">
+                      {category.name}
+                    </h3>
+                    <div className="grid grid-cols-1 gap-2">
+                      {category.items.map((item, itemIdx) => (
+                        <button 
+                          key={itemIdx}
+                          onClick={() => toggleShoppingItem(catIdx, itemIdx)}
+                          className={cn(
+                            "flex items-center gap-3 p-3 rounded-xl transition-all text-left",
+                            item.checked ? "bg-gray-100 opacity-60" : "bg-white shadow-sm border border-gray-100"
+                          )}
+                        >
+                          {item.checked ? (
+                            <CheckCircle2 size={20} className="text-brand-primary shrink-0" />
+                          ) : (
+                            <Circle size={20} className="text-gray-300 shrink-0" />
+                          )}
+                          <div className="flex-1">
+                            <p className={cn("text-sm font-medium", item.checked && "line-through text-gray-500")}>
+                              {item.name}
+                            </p>
+                            <p className="text-[11px] text-gray-400">{item.amount}</p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* Recipe Modal */}
+      <AnimatePresence>
+        {selectedRecipe && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4"
+            onClick={() => setSelectedRecipe(null)}
+          >
+            <motion.div 
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              className="bg-white w-full max-w-2xl rounded-t-3xl md:rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-6 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white z-10">
+                <div>
+                  <h3 className="text-2xl font-serif font-bold text-brand-primary">{selectedRecipe.title}</h3>
+                  <p className="text-sm text-gray-500">{selectedRecipe.description}</p>
+                </div>
+                <button 
+                  onClick={() => setSelectedRecipe(null)}
+                  className="p-2 hover:bg-gray-100 rounded-full text-gray-400 transition-colors"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                {/* Ingredients */}
+                <section>
+                  <h4 className="text-xs font-bold text-brand-accent uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <Utensils size={14} /> Ingredientes
+                  </h4>
+                  <ul className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {selectedRecipe.ingredients.map((ing, i) => (
+                      <li key={i} className="flex items-start gap-2 text-sm text-gray-700 bg-brand-secondary/30 p-3 rounded-xl">
+                        <div className="w-1.5 h-1.5 bg-brand-primary rounded-full mt-1.5 shrink-0" />
+                        {ing}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+
+                {/* Instructions */}
+                <section>
+                  <h4 className="text-xs font-bold text-brand-accent uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <Clock size={14} /> Preparación
+                  </h4>
+                  <div className="space-y-4">
+                    {selectedRecipe.instructions.map((step, i) => (
+                      <div key={i} className="flex gap-4">
+                        <div className="w-6 h-6 bg-brand-primary/10 text-brand-primary rounded-full flex items-center justify-center text-xs font-bold shrink-0">
+                          {i + 1}
+                        </div>
+                        <p className="text-sm text-gray-700 leading-relaxed">{step}</p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                {/* Tips */}
+                <section className="bg-brand-primary/5 p-4 rounded-2xl border border-brand-primary/10">
+                  <h4 className="text-xs font-bold text-brand-primary uppercase tracking-widest mb-2 flex items-center gap-2">
+                    <Info size={14} /> Consejos del Coach
+                  </h4>
+                  <p className="text-sm italic text-brand-primary/80 leading-relaxed">
+                    {selectedRecipe.tips}
+                  </p>
+                </section>
+              </div>
+
+              <div className="p-6 border-t border-gray-100 bg-gray-50">
+                <button 
+                  onClick={() => setSelectedRecipe(null)}
+                  className="w-full py-3 bg-brand-primary text-white rounded-full font-bold shadow-md hover:bg-brand-primary/90 transition-all"
+                >
+                  Entendido
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Camera Overlay */}
+      <AnimatePresence>
+        {isCameraOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center p-4"
+          >
+            <button 
+              onClick={closeCamera}
+              className="absolute top-6 right-6 text-white p-2 hover:bg-white/10 rounded-full"
+            >
+              <X size={32} />
+            </button>
+            
+            <div className="relative w-full max-w-md aspect-[3/4] bg-gray-900 rounded-3xl overflow-hidden shadow-2xl border-4 border-white/20">
+              {!capturedImage ? (
+                <video 
+                  ref={videoRef} 
+                  autoPlay 
+                  playsInline 
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <img 
+                  src={capturedImage} 
+                  alt="Captured" 
+                  className="w-full h-full object-cover"
+                />
+              )}
+              
+              <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-6">
+                {!capturedImage ? (
+                  <button 
+                    onClick={captureImage}
+                    className="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-lg active:scale-95 transition-transform"
+                  >
+                    <div className="w-12 h-12 border-4 border-gray-200 rounded-full" />
+                  </button>
+                ) : (
+                  <>
+                    <button 
+                      onClick={() => setCapturedImage(null)}
+                      className="px-6 py-3 bg-white/20 backdrop-blur-md text-white rounded-full font-medium hover:bg-white/30 transition-colors"
+                    >
+                      Repetir
+                    </button>
+                    <button 
+                      onClick={analyzeCapturedImage}
+                      className="px-6 py-3 bg-brand-accent text-white rounded-full font-medium shadow-lg hover:bg-brand-accent/90 transition-colors"
+                    >
+                      Analizar
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            <p className="mt-6 text-white/70 text-center max-w-xs">
+              Enfoca la etiqueta de ingredientes para analizar ultraprocesados.
+            </p>
+            <canvas ref={canvasRef} className="hidden" />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Footer Controls (Only in Chat Mode) */}
+      {viewMode === 'chat' && (
+        <footer className="bg-white border-t border-gray-200 p-4 md:p-6">
+          <div className="max-w-4xl mx-auto flex items-center gap-3">
+            <button 
+              onClick={openCamera}
+              className="p-3 text-gray-500 hover:text-brand-primary hover:bg-brand-secondary rounded-full transition-all"
+              title="Analizar alimento"
+            >
+              <Camera size={24} />
+            </button>
+            
+            <button 
+              onClick={toggleVoiceMode}
+              className={cn(
+                "p-3 rounded-full transition-all",
+                isVoiceMode 
+                  ? "bg-red-100 text-red-600 animate-pulse" 
+                  : "text-gray-500 hover:text-brand-primary hover:bg-brand-secondary"
+              )}
+              title="Modo voz"
+            >
+              {isVoiceMode ? <MicOff size={24} /> : <Mic size={24} />}
+            </button>
+
+            <div className="flex-1 relative">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleSendMessage(input)}
+                placeholder="Escribe tu consulta aquí..."
+                className="w-full bg-gray-50 border border-gray-200 rounded-full px-6 py-3 focus:outline-none focus:ring-2 focus:ring-brand-primary/20 focus:border-brand-primary transition-all pr-12"
+              />
+              <button 
+                onClick={() => handleSendMessage(input)}
+                disabled={!input.trim() || isLoading}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-brand-primary disabled:text-gray-300 transition-colors"
+              >
+                <Send size={20} />
+              </button>
+            </div>
+
+            {isSpeaking && (
+              <button 
+                onClick={stopSpeaking}
+                className="p-3 bg-brand-accent text-white rounded-full animate-bounce shadow-lg"
+                title="Detener audio"
+              >
+                <VolumeX size={24} />
+              </button>
+            )}
+          </div>
+          
+          <div className="mt-4 flex justify-center gap-6 text-[10px] text-gray-400 font-medium uppercase tracking-widest">
+            <span className="flex items-center gap-1"><Info size={10} /> No sustituye consejo médico</span>
+            <span className="flex items-center gap-1"><Sparkles size={10} /> IA Especializada</span>
+          </div>
+        </footer>
+      )}
+    </div>
+  );
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Inter:wght@100..900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Cormorant Garamond", serif;
+  
+  --color-brand-primary: #5A5A40; /* Olive */
+  --color-brand-secondary: #f5f5f0; /* Warm off-white */
+  --color-brand-accent: #D4A373; /* Sandy brown */
+}
+
+@layer base {
+  body {
+    @apply bg-brand-secondary text-gray-900 font-sans antialiased;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-serif;
+  }
+}
+
+.markdown-body {
+  @apply max-w-none;
+}
+
+.markdown-body p {
+  @apply mb-4 leading-relaxed;
+}
+
+.markdown-body strong {
+  @apply font-semibold text-brand-primary;
+}
+
+.markdown-body ul {
+  @apply list-disc pl-5 mb-4;
+}
+
+.markdown-body li {
+  @apply mb-1;
+}
+
+
+import {StrictMode} from 'react';
+import {createRoot} from 'react-dom/client';
+import App from './App.tsx';
+import './index.css';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
