@@ -1,0 +1,5 @@
+{
+  "name": "HormoneHealth Coach",
+  "description": "Expert AI assistant for clinical nutrition and female hormonal health, specializing in Mediterranean diet, hypothyroidism, and menopause.",
+  "requestFramePermissions": ["camera", "microphone"]
+}
